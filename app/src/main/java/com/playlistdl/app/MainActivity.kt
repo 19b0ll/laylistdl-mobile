@@ -1,8 +1,8 @@
 package com.playlistdl.app
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.os.Bundle
-import android.os.StrictMode
 import android.graphics.Color
 import android.view.Gravity
 import android.view.View
@@ -24,12 +24,6 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        StrictMode.setThreadPolicy(
-            StrictMode.ThreadPolicy.Builder()
-                .permitAll()
-                .build()
-        )
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -61,7 +55,9 @@ class MainActivity : Activity() {
 
         searchButton = Button(this).apply {
             text = "استخراج آهنگ‌ها"
-            setOnClickListener { loadPlaylist() }
+            setOnClickListener {
+                loadPlaylist()
+            }
         }
 
         statusText = TextView(this).apply {
@@ -89,11 +85,15 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
         )
+
         setContentView(scroll)
     }
 
     private fun addSpace(layout: LinearLayout, height: Int) {
-        layout.addView(View(this), LinearLayout.LayoutParams(1, height))
+        layout.addView(
+            View(this),
+            LinearLayout.LayoutParams(1, height)
+        )
     }
 
     private fun loadPlaylist() {
@@ -103,8 +103,12 @@ class MainActivity : Activity() {
             """(?:playlist/|playlist:)([A-Za-z0-9]+)"""
         ).find(input)?.groupValues?.get(1)
 
-        if (id == null || !input.contains("spotify", true)) {
-            playlistInput.error = "لینک معتبر پلی‌لیست Spotify وارد کن"
+        if (
+            id == null ||
+            !input.contains("spotify", ignoreCase = true)
+        ) {
+            playlistInput.error =
+                "لینک معتبر پلی‌لیست Spotify وارد کن"
             return
         }
 
@@ -123,28 +127,17 @@ class MainActivity : Activity() {
 
                 if (tracks.isEmpty()) {
                     statusText.text =
-                        "استخراج ناموفق بود. ممکن است Spotify دسترسی عمومی ندهد."
+                        "استخراج ناموفق بود. دسترسی عمومی Spotify را بررسی کن."
                     return@runOnUiThread
                 }
 
-                statusText.text = "${tracks.size} آهنگ استخراج شد"
-
-                val names = tracks.toTypedArray()
+                statusText.text =
+                    "${tracks.size} آهنگ استخراج شد"
 
                 AlertDialog.Builder(this)
                     .setTitle("آهنگ‌های پلی‌لیست")
-                    .setItems(names) { _, index ->
-                        val query = URLEncoder.encode(
-                            tracks[index],
-                            "UTF-8"
-                        )
-
-                        val url =
-                            "https://www.youtube.com/results?search_query=$query"
-
-                        startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                        )
+                    .setItems(tracks.toTypedArray()) { _, index ->
+                        openYouTube(tracks[index])
                     }
                     .setPositiveButton("بستن", null)
                     .show()
@@ -157,58 +150,86 @@ class MainActivity : Activity() {
             "https://open.spotify.com/embed/playlist/$playlistId"
         )
 
-        val connection = url.openConnection() as HttpURLConnection
+        val connection =
+            url.openConnection() as HttpURLConnection
+
         connection.connectTimeout = 15000
         connection.readTimeout = 15000
+        connection.requestMethod = "GET"
         connection.setRequestProperty(
             "User-Agent",
-            "Mozilla/5.0"
+            "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
         )
 
         try {
+            val responseCode = connection.responseCode
+
+            if (responseCode !in 200..299) {
+                return emptyList()
+            }
+
             val html = connection.inputStream
                 .bufferedReader()
                 .use { it.readText() }
 
             val results = linkedSetOf<String>()
 
-            // Spotify embed may expose track metadata as JSON.
-            val marker = "\"trackList\""
-            val start = html.indexOf(marker)
+            // تلاش برای خواندن عنوان آهنگ‌ها از داده‌های embed
+            val patterns = listOf(
+                """"trackList"\s*:\s*(\[[\s\S]*?\])""",
+                """"tracks"\s*:\s*(\[[\s\S]*?\])"""
+            )
 
-            if (start >= 0) {
-                val end = html.indexOf("\"tracks\"", start + marker.length)
-                    .takeIf { it > start }
-                    ?: minOf(html.length, start + 500000)
-
-                val section = html.substring(start, end)
-
-                val titlePattern = Pattern.compile(
-                    "\"title\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\""
-                )
-
-                val matcher = titlePattern.matcher(section)
+            for (pattern in patterns) {
+                val matcher = Pattern.compile(pattern).matcher(html)
 
                 while (matcher.find() && results.size < 100) {
-                    val raw = matcher.group(1) ?: continue
+                    val section = matcher.group(1) ?: continue
 
-                    val decoded = try {
-                        JSONObject("{\"v\":\"$raw\"}").getString("v")
-                    } catch (_: Exception) {
-                        raw
-                    }
+                    val titleMatcher = Pattern.compile(
+                        """"title"\s*:\s*"((?:\\.|[^"\\])*)""""
+                    ).matcher(section)
 
-                    if (decoded.isNotBlank() &&
-                        !decoded.equals("undefined", true)
-                    ) {
-                        results.add(decoded)
+                    while (titleMatcher.find() && results.size < 100) {
+                        val raw = titleMatcher.group(1) ?: continue
+
+                        val decoded = try {
+                            JSONObject()
+                                .put("value", raw)
+                                .toString()
+                                .let {
+                                    JSONObject(it).getString("value")
+                                }
+                        } catch (_: Exception) {
+                            raw
+                        }
+
+                        if (
+                            decoded.isNotBlank() &&
+                            !decoded.equals("undefined", true)
+                        ) {
+                            results.add(decoded)
+                        }
                     }
                 }
+
+                if (results.isNotEmpty()) break
             }
 
             return results.toList()
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun openYouTube(track: String) {
+        val query = URLEncoder.encode(track, "UTF-8")
+
+        val url =
+            "https://www.youtube.com/results?search_query=$query"
+
+        startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        )
     }
 }
