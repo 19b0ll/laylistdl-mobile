@@ -12,8 +12,11 @@ import android.widget.TextView
 import android.widget.EditText
 import android.widget.Button
 import android.widget.ScrollView
-import android.widget.Toast
+import android.provider.MediaStore
+import android.content.ContentValues
+import android.net.Uri
 import java.io.File
+import java.io.FileInputStream
 import java.util.concurrent.TimeUnit
 import dev.ffmpegkit_maintained.ytdlp.YtDlp
 import dev.ffmpegkit_maintained.ytdlp.YtDlpRequest
@@ -24,7 +27,6 @@ class MainActivity : Activity() {
     private lateinit var urlInput: EditText
     private lateinit var downloadButton: Button
     private lateinit var statusText: TextView
-
     private var isDownloading = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -45,7 +47,7 @@ class MainActivity : Activity() {
         }
 
         val subtitle = TextView(this).apply {
-            text = "دانلود موسیقی و پلی‌لیست"
+            text = "دانلود از لینک‌های پشتیبانی‌شده"
             textSize = 16f
             setTextColor(Color.LTGRAY)
             gravity = Gravity.CENTER
@@ -56,11 +58,10 @@ class MainActivity : Activity() {
             setSingleLine(true)
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
-            setPadding(20, 16, 20, 16)
         }
 
         val format = TextView(this).apply {
-            text = "فرمت خروجی: MP3 | کیفیت هدف: 320 kbps"
+            text = "خروجی MP3 | هدف کیفیت: 320 kbps\nMusic/PlaylistDL"
             textSize = 14f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
@@ -68,13 +69,11 @@ class MainActivity : Activity() {
 
         downloadButton = Button(this).apply {
             text = "دانلود"
-            setOnClickListener {
-                startDownload()
-            }
+            setOnClickListener { startDownload() }
         }
 
         statusText = TextView(this).apply {
-            text = "آمادهٔ دانلود"
+            text = "آماده"
             textSize = 14f
             setTextColor(Color.LTGRAY)
             gravity = Gravity.CENTER
@@ -91,41 +90,38 @@ class MainActivity : Activity() {
         layout.addView(downloadButton)
         layout.addView(statusText)
 
-        val scrollView = ScrollView(this)
-        scrollView.addView(
-            layout,
-            ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-        )
-
-        setContentView(scrollView)
+        val scroll = ScrollView(this)
+        scroll.addView(layout, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        setContentView(scroll)
     }
 
     private fun addSpace(layout: LinearLayout, height: Int) {
-        layout.addView(
-            View(this),
-            LinearLayout.LayoutParams(
-                1,
-                height
-            )
-        )
+        layout.addView(View(this), LinearLayout.LayoutParams(1, height))
     }
 
     private fun startDownload() {
         if (isDownloading) return
 
         val url = urlInput.text.toString().trim()
-
         if (url.isEmpty()) {
-            urlInput.error = "لطفاً لینک را وارد کن"
+            urlInput.error = "لینک را وارد کن"
             return
         }
 
-        if (!url.startsWith("https://") &&
-            !url.startsWith("http://")) {
+        if (!url.startsWith("https://") && !url.startsWith("http://")) {
             urlInput.error = "لینک معتبر وارد کن"
+            return
+        }
+
+        if (isSpotifyUrl(url)) {
+            showStatus(
+                "این نسخه هنوز به Spotify API متصل نیست. " +
+                "لینک اسپاتیفای برای استخراج آهنگ‌ها پشتیبانی نمی‌شود. " +
+                "از لینک منبع صوتی پشتیبانی‌شده استفاده کن."
+            )
             return
         }
 
@@ -137,7 +133,7 @@ class MainActivity : Activity() {
 
         val outputDir = File(root, "PlaylistDL")
         if (!outputDir.exists() && !outputDir.mkdirs()) {
-            showStatus("ساخت پوشهٔ دانلود ناموفق بود")
+            showStatus("ساخت پوشهٔ موقت ناموفق بود")
             return
         }
 
@@ -161,97 +157,93 @@ class MainActivity : Activity() {
                     .addOption("--yes-playlist")
                     .addOption("--no-mtime")
                     .addOption("--ignore-errors")
+                    .addOption("--no-overwrites")
 
                 runOnUiThread {
-                    showStatus("در حال دانلود آهنگ‌ها...")
+                    showStatus("در حال دریافت از منبع پشتیبانی‌شده...")
                 }
 
-                val future = YtDlp.executeAsync(request) {
-                        progress, eta, line ->
+                val result = YtDlp.executeAsync(request) { progress, eta, line ->
                     runOnUiThread {
-                        val percent = progress.toInt().coerceIn(0, 100)
                         showStatus(
-                            "دانلود: $percent%\n" +
+                            "دانلود: ${progress.toInt().coerceIn(0, 100)}%\n" +
                             "زمان باقی‌مانده: ${eta.coerceAtLeast(0)} ثانیه"
                         )
                     }
-                }
-
-                val result = future.get(12, TimeUnit.HOURS)
+                }.get(12, TimeUnit.HOURS)
 
                 if (!result.isSuccess) {
-                    throw Exception("موتور دانلود با خطا متوقف شد")
-                }
-
-                runOnUiThread {
-                    showStatus("دانلود تمام شد؛ بررسی فایل‌ها...")
-                }
-
-                val mediaFiles = outputDir.walkTopDown()
-                    .filter { file ->
-                        file.isFile &&
-                        file.extension.lowercase() in listOf(
-                            "m4a", "webm", "opus", "aac",
-                            "wav", "flac", "ogg", "mp4", "mkv"
-                        )
-                    }
-                    .toList()
-
-                if (mediaFiles.isEmpty()) {
                     throw Exception(
-                        "فایل صوتی پیدا نشد؛ ممکن است سایت از دانلود پشتیبانی نکند"
+                        "دانلود ناموفق بود؛ ممکن است سایت پشتیبانی نشود."
                     )
                 }
 
-                var converted = 0
+                val mediaFiles = outputDir.walkTopDown().filter { file ->
+                    file.isFile && file.extension.lowercase() in listOf(
+                        "mp3", "m4a", "webm", "opus", "aac",
+                        "wav", "flac", "ogg", "mp4", "mkv"
+                    )
+                }.toList()
+
+                if (mediaFiles.isEmpty()) {
+                    throw Exception("فایل صوتی پیدا نشد.")
+                }
+
+                var saved = 0
                 var failed = 0
 
                 for (input in mediaFiles) {
-                    val output = File(
-                        input.parentFile,
-                        input.nameWithoutExtension + ".mp3"
-                    )
+                    val mp3 = if (input.extension.equals("mp3", true)) {
+                        input
+                    } else {
+                        val target = File(
+                            input.parentFile,
+                            input.nameWithoutExtension + ".mp3"
+                        )
 
-                    runOnUiThread {
-                        showStatus("در حال تبدیل به MP3:\n${input.name}")
+                        runOnUiThread {
+                            showStatus("در حال تبدیل به MP3:\n${input.name}")
+                        }
+
+                        val command = arrayOf(
+                            "-y", "-i", input.absolutePath, "-vn",
+                            "-codec:a", "libmp3lame",
+                            "-b:a", "320k", target.absolutePath
+                        )
+
+                        val session = FFmpegKit.executeWithArguments(command)
+
+                        if (session.returnCode.isValueSuccess &&
+                            target.exists() && target.length() > 0
+                        ) {
+                            input.delete()
+                            target
+                        } else {
+                            failed++
+                            continue
+                        }
                     }
 
-                    val command = arrayOf(
-                        "-y",
-                        "-i", input.absolutePath,
-                        "-vn",
-                        "-codec:a", "libmp3lame",
-                        "-b:a", "320k",
-                        output.absolutePath
-                    )
-
-                    val session = FFmpegKit.executeWithArguments(command)
-
-                    if (session.returnCode.isValueSuccess &&
-                        output.exists() &&
-                        output.length() > 0
-                    ) {
-                        converted++
-                        input.delete()
-                    } else {
+                    try {
+                        if (copyToMusic(mp3)) {
+                            saved++
+                        } else {
+                            failed++
+                        }
+                    } catch (_: Exception) {
                         failed++
                     }
                 }
 
                 runOnUiThread {
                     showStatus(
-                        "فرایند تمام شد.\n" +
-                        "تبدیل موفق: $converted\n" +
-                        "تبدیل ناموفق: $failed\n\n" +
-                        "محل فایل‌ها:\n${outputDir.absolutePath}"
+                        "فرایند تمام شد.\nذخیره‌شده در Music: $saved\n" +
+                        "ناموفق: $failed\nمسیر: Music/PlaylistDL"
                     )
                 }
-
             } catch (e: Exception) {
                 runOnUiThread {
-                    showStatus(
-                        "خطا:\n${e.cause?.message ?: e.message ?: "خطای ناشناخته"}"
-                    )
+                    showStatus("خطا:\n${e.cause?.message ?: e.message}")
                 }
             } finally {
                 runOnUiThread {
@@ -261,6 +253,42 @@ class MainActivity : Activity() {
                 }
             }
         }.start()
+    }
+
+    private fun isSpotifyUrl(value: String): Boolean {
+        val host = try {
+            Uri.parse(value).host?.lowercase()
+        } catch (_: Exception) {
+            null
+        } ?: return false
+
+        return host == "spotify.com" || host.endsWith(".spotify.com")
+    }
+
+    private fun copyToMusic(source: File): Boolean {
+        val values = ContentValues().apply {
+            put(MediaStore.Audio.Media.DISPLAY_NAME, source.name)
+            put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
+            put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/PlaylistDL")
+            put(MediaStore.Audio.Media.IS_MUSIC, 1)
+        }
+
+        val collection = MediaStore.Audio.Media.getContentUri(
+            MediaStore.VOLUME_EXTERNAL_PRIMARY
+        )
+        val uri = contentResolver.insert(collection, values) ?: return false
+
+        return try {
+            contentResolver.openOutputStream(uri)?.use { output ->
+                FileInputStream(source).use { input ->
+                    input.copyTo(output)
+                }
+            } ?: throw Exception("نوشتن فایل ناموفق بود")
+            true
+        } catch (e: Exception) {
+            contentResolver.delete(uri, null, null)
+            throw e
+        }
     }
 
     private fun showStatus(message: String) {
